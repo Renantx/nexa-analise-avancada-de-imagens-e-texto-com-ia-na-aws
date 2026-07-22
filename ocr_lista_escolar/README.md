@@ -2,26 +2,43 @@
 
 Projeto usado para exemplificar o uso do [AWS Textract](https://docs.aws.amazon.com/pt_br/textract/latest/dg/API_DetectDocumentText.html) na extração de textos em imagens simples.
 
-## Pré requisitos
+## Pré-requisitos
 
-- Python
-- Uv
-- Conta AWS
-
-## Configuração do ambiente
-
-É necessário configurar um usuário no IAM com acesso ao serviço Textract.
+- Python 3.13+
+- [uv](https://docs.astral.sh/uv/)
+- Conta AWS com permissão `textract:DetectDocumentText`
 
 ## Instalação
 
-Para instalar as dependências do projeto utilize o comando:
+```sh
+uv sync
+```
+
+Para desenvolvimento (testes):
 
 ```sh
-uv install
+uv sync --group dev
 ```
 
 ## Execução
 
-```
+```sh
 uv run main.py
 ```
+
+Opções:
+
+```sh
+uv run main.py --image images/lista-material-escolar.jpeg --region us-east-1
+uv run main.py --force   # ignora o cache local response.json
+```
+
+Na primeira execução (ou com `--force`), a API é chamada e o resultado é salvo em `response.json` (arquivo local, ignorado pelo Git). Nas execuções seguintes, o cache é reutilizado.
+
+## Testes
+
+```sh
+uv run pytest
+```
+
+Os testes usam a fixture em `fixtures/textract_response.json` e **não** chamam a AWS.

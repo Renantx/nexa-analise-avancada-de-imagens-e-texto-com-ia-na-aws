@@ -1,70 +1,81 @@
+import argparse
 import json
+import os
+import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from mypy_boto3_textract.type_defs import BlockTypeDef
 
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_IMAGE = BASE_DIR / "images" / "cnh.png"
+CACHE_PATH = BASE_DIR / "response.json"
 
-def get_document_data(file_name: str) -> bytearray:
+
+def get_document_data(file_name: Path) -> bytes:
+    if not file_name.is_file():
+        raise FileNotFoundError(f"Imagem não encontrada: {file_name}")
     with open(file_name, "rb") as file:
-        img = file.read()
-        doc_bytes = bytearray(img)
-        print(f"Imagem carregada {file_name}")
-    return doc_bytes
+        data = file.read()
+    print(f"Imagem carregada: {file_name}")
+    return data
 
 
-def analyze_document() -> None:
-    client = boto3.client("textract")
-    file_path = str(Path(__file__).parent / "images" / "cnh.png")
+def analyze_document(
+    file_path: Path,
+    cache_path: Path,
+    region: str | None = None,
+) -> dict[str, Any]:
+    client = boto3.client("textract", region_name=region)
     doc_bytes = get_document_data(file_path)
     response = client.analyze_document(
-        Document={"Bytes": doc_bytes},  # type: ignore
+        Document={"Bytes": doc_bytes},
         FeatureTypes=["FORMS"],
     )
-    with open("response.json", "w") as response_file:
-        response_file.write(json.dumps(response))
+    cache_path.write_text(json.dumps(response), encoding="utf-8")
+    print(f"Resposta salva em: {cache_path}")
+    return response
 
 
-def get_kv_map() -> Tuple[Dict[str, Dict], Dict[str, Dict], Dict[str, Dict]]:
-    key_map: Dict[str, Dict] = {}
-    value_map: Dict[str, Dict] = {}
-    block_map: Dict[str, Dict] = {}
-    blocks: List[BlockTypeDef] = []
+def load_blocks(
+    file_path: Path,
+    cache_path: Path,
+    *,
+    force: bool = False,
+    region: str | None = None,
+) -> list[BlockTypeDef]:
+    if force or not cache_path.is_file():
+        response = analyze_document(file_path, cache_path, region=region)
+        return response["Blocks"]
 
-    try:
-        with open("response.json", "r") as file:
-            blocks = json.loads(file.read())["Blocks"]
-    except IOError:
-        analyze_document()
+    with open(cache_path, encoding="utf-8") as file:
+        return json.loads(file.read())["Blocks"]
+
+
+def get_kv_map(
+    blocks: list[BlockTypeDef],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    key_map: dict[str, dict[str, Any]] = {}
+    value_map: dict[str, dict[str, Any]] = {}
+    block_map: dict[str, dict[str, Any]] = {}
 
     for block in blocks:
-        block_id = block["Id"]  # type: ignore
-        block_map[block_id] = block  # type: ignore
-        if block["BlockType"] == "KEY_VALUE_SET":  # type: ignore
-            if "KEY" in block["EntityTypes"]:  # type: ignore
-                key_map[block_id] = block  # type: ignore
+        block_id = block["Id"]
+        block_map[block_id] = block  # type: ignore[assignment]
+        if block["BlockType"] == "KEY_VALUE_SET":
+            if "KEY" in block.get("EntityTypes", []):
+                key_map[block_id] = block  # type: ignore[assignment]
             else:
-                value_map[block_id] = block  # type: ignore
+                value_map[block_id] = block  # type: ignore[assignment]
 
     return key_map, value_map, block_map
 
 
-def get_kv_relationship(
-    key_map: Dict[str, Dict], value_map: Dict[str, Dict], block_map: Dict[str, Dict]
-) -> Dict:
-    kvs = {}
-    for _, key_block in key_map.items():
-        value_block = find_value_block(key_block, value_map)
-        key = get_text(key_block, block_map)
-        value = get_text(value_block, block_map)
-        kvs[key] = value
-    return kvs
-
-
 def find_value_block(
-    key_block: Dict[str, Dict], value_map: Dict[str, Dict]
-) -> Dict[str, Dict]:
+    key_block: dict[str, Any], value_map: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
     for relationship in key_block.get("Relationships", []):
         if relationship["Type"] == "VALUE":
             for value_id in relationship["Ids"]:
@@ -72,22 +83,81 @@ def find_value_block(
     return {}
 
 
-def get_text(result: Dict[str, Dict], block_map: Dict[str, Dict]) -> str:
+def get_text(result: dict[str, Any], block_map: dict[str, dict[str, Any]]) -> str:
     text = ""
-    if "Relationships" in result:
-        for relationship in result["Relationships"]:
-            if relationship["Type"] == "CHILD":
-                for child_id in relationship["Ids"]:
-                    word = block_map[child_id]
-                    if word["BlockType"] == "WORD":
-                        text += word["Text"] + " "
+    for relationship in result.get("Relationships", []):
+        if relationship["Type"] == "CHILD":
+            for child_id in relationship["Ids"]:
+                word = block_map[child_id]
+                if word["BlockType"] == "WORD":
+                    text += word["Text"] + " "
     return text.rstrip()
 
 
-if __name__ == "__main__":
-    key_map, value_map, block_map = get_kv_map()
-    kvs = get_kv_relationship(key_map, value_map, block_map)
+def get_kv_relationship(
+    key_map: dict[str, dict[str, Any]],
+    value_map: dict[str, dict[str, Any]],
+    block_map: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    kvs: dict[str, str] = {}
+    for key_block in key_map.values():
+        value_block = find_value_block(key_block, value_map)
+        key = get_text(key_block, block_map)
+        value = get_text(value_block, block_map)
+        if key:
+            kvs[key] = value
+    return kvs
 
-    print("\n\n== DADOS DA CNH ==\n\n")
-    for k, v in kvs.items():
-        print(f"{k}: {v}")
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Extrai campos de uma CNH com Amazon Textract (FORMS)."
+    )
+    parser.add_argument(
+        "--image",
+        type=Path,
+        default=DEFAULT_IMAGE,
+        help=f"Caminho da imagem (padrão: {DEFAULT_IMAGE.name})",
+    )
+    parser.add_argument(
+        "--region",
+        default=os.getenv("AWS_DEFAULT_REGION") or os.getenv("AWS_REGION"),
+        help="Região AWS (padrão: AWS_DEFAULT_REGION / AWS_REGION)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignora o cache local e chama a API novamente",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        blocks = load_blocks(
+            args.image.resolve(),
+            CACHE_PATH,
+            force=args.force,
+            region=args.region,
+        )
+        key_map, value_map, block_map = get_kv_map(blocks)
+        kvs = get_kv_relationship(key_map, value_map, block_map)
+
+        print("\n\n== DADOS DA CNH ==\n")
+        if not kvs:
+            print("Nenhum campo chave/valor encontrado.")
+            return 0
+        for key, value in kvs.items():
+            print(f"{key}: {value}")
+        return 0
+    except FileNotFoundError as exc:
+        print(f"Erro: {exc}", file=sys.stderr)
+        return 1
+    except (ClientError, BotoCoreError) as exc:
+        print(f"Erro ao chamar o Textract: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

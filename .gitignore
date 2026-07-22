@@ -175,3 +175,10 @@ pyrightconfig.json
 
 .python-version
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+# Cache local das respostas Textract (dados sensíveis / PII)
+**/response.json
+
+# Imagens anotadas geradas pelos scripts de Rekognition
+**/*-resultado.jpg
+**/resultado_*.jpg
